@@ -1,0 +1,139 @@
+import os
+from typing import Any, Dict
+import boto3
+import kaggle
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.amazon.aws.transfers.local_to_s3 import (
+    LocalFilesystemToS3Operator,
+)
+from airflow.utils.dates import days_ago
+from pathlib import Path
+
+
+def download_brain_tumor_dataset(dataset_path: str) -> str:
+    base_dir = Path(dataset_path) / "brain_tumor_dataset"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    dataset = "masoudnickparvar/brain-tumor-mri-dataset"
+    kaggle.api.dataset_download_files(
+        dataset, path=str(base_dir), unzip=True, quiet=False
+    )
+    return str(base_dir)
+
+
+def create_s3_bucket(bucket_name: str) -> str:
+    s3_client = boto3.client("s3")
+    existing_buckets = s3_client.list_buckets()["Buckets"]
+    bucket_names = [bucket["Name"] for bucket in existing_buckets]
+    if bucket_name not in bucket_names:
+        s3_client.create_bucket(Bucket=bucket_name)
+    return bucket_name
+
+
+def process_and_upload_metadata() -> None:
+    import pandas as pd
+
+    data_dir = "/tmp/brain_tumor_dataset"
+    train_data = []
+    test_data = []
+
+    class_mapping = {
+        "glioma": 0,
+        "meningioma": 1,
+        "notumor": 2,
+        "pituitary": 3,
+    }
+
+    for split in ["Training", "Testing"]:
+        for class_name, class_id in class_mapping.items():
+            class_dir = os.path.join(data_dir, split, class_name)
+            if os.path.exists(class_dir):
+                for img_file in os.listdir(class_dir):
+                    if img_file.lower().endswith((".jpg", ".jpeg", ".png")):
+                        file_path = os.path.join(class_dir, img_file)
+                        if split == "Training":
+                            train_data.append(
+                                {
+                                    "file_location": file_path,
+                                    "class": class_name,
+                                    "class_id": class_id,
+                                }
+                            )
+                        else:
+                            test_data.append(
+                                {
+                                    "file_location": file_path,
+                                    "class": class_name,
+                                    "class_id": class_id,
+                                }
+                            )
+
+    train_df = pd.DataFrame(train_data)
+    test_df = pd.DataFrame(test_data)
+
+    train_df.to_pickle("/tmp/train_metadata.pkl")
+    test_df.to_pickle("/tmp/test_metadata.pkl")
+
+
+default_args: Dict[str, Any] = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "start_date": days_ago(1),
+    "retries": 3,
+}
+
+with DAG(
+    "generation_tumor",
+    default_args=default_args,
+    description="Brain Tumor Dataset Generation DAG",
+    schedule_interval=None,
+    catchup=False,
+) as dag:
+    download_data_op = PythonOperator(
+        task_id="download_data_op",
+        python_callable=lambda: download_brain_tumor_dataset("/tmp"),
+    )
+
+    create_bucket_op = PythonOperator(
+        task_id="create_bucket_op",
+        python_callable=lambda: create_s3_bucket("brain-tumor-bucket"),
+    )
+
+    process_metadata_op = PythonOperator(
+        task_id="process_metadata_op",
+        python_callable=process_and_upload_metadata,
+    )
+
+    upload_raw_data_op = LocalFilesystemToS3Operator(
+        task_id="upload_raw_data_op",
+        filename="/tmp/brain_tumor_dataset",
+        dest_key="raw/",
+        dest_bucket="brain-tumor-bucket",
+        replace=True,
+        aws_conn_id="aws_default",
+    )
+
+    upload_train_metadata_op = LocalFilesystemToS3Operator(
+        task_id="upload_train_metadata_op",
+        filename="/tmp/train_metadata.pkl",
+        dest_key="processed/train_metadata.pkl",
+        dest_bucket="brain-tumor-bucket",
+        replace=True,
+        aws_conn_id="aws_default",
+    )
+
+    upload_test_metadata_op = LocalFilesystemToS3Operator(
+        task_id="upload_test_metadata_op",
+        filename="/tmp/test_metadata.pkl",
+        dest_key="processed/test_metadata.pkl",
+        dest_bucket="brain-tumor-bucket",
+        replace=True,
+        aws_conn_id="aws_default",
+    )
+
+    (
+        download_data_op
+        >> create_bucket_op
+        >> [upload_raw_data_op, process_metadata_op]
+    )
+    process_metadata_op >> [upload_train_metadata_op, upload_test_metadata_op]
