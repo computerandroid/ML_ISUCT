@@ -1,2 +1,1 @@
-# ML_ISUCT
-Repository Machine Learning ISUCT
+# Voronkov Alexander 4/245

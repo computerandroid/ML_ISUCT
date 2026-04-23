@@ -1,0 +1,87 @@
+services:
+  triton-server:
+    image: nvcr.io/nvidia/tritonserver:23.07-py3
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    volumes:
+      - ./models:/models
+    command: ["tritonserver", "--model-repository=/models"]
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  s3-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.s3
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=password123
+      - BUCKET_NAME=brain-images
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import boto3; client = boto3.client('s3', endpoint_url='http://minio:9000', aws_access_key_id='admin', aws_secret_access_key='password123', verify=False); client.head_bucket(Bucket='brain-images')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  server:
+    build: 
+      context: ./server
+      dockerfile: Dockerfile
+    environment:
+      - MODEL_NAME=brain-cancer
+      - TRITON_HOST=triton-server
+      - TRITON_PORT=8001
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=password123
+      - BUCKET_NAME=brain-images
+    ports:
+      - "8081:8080"
+    depends_on:
+      triton-server:
+        condition: service_healthy
+      s3-init:
+        condition: service_healthy
+    networks:
+      - app-network
+
+volumes:
+  minio_data:
+
+networks:
+  app-network:
+    driver: bridge
