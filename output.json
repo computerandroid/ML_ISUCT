@@ -1,0 +1,1 @@
+{"message":"Brain cancer classification completed","prediction":{"class":1,"class_name":"tumour","confidence_percent":94.81,"probabilities":{"Normal Tissue":5.19,"tumour":94.81}},"image_info":{"filename":"image.png","processed_shape":[244,244,3]},"saved_keys":["original/image.png","meta/image.png.json"]}  
